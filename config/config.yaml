@@ -1,0 +1,6 @@
+# config/config.yaml
+genome_fasta:    "data/raw/kpneumoniae_HS11286_genome.fasta"
+target_gene_fasta: "data/raw/blaCTX-M-15_ref.fasta"
+max_mismatches:  3
+threads:         4
+output_prefix:   "blaCTX-M-15_gRNA_results"

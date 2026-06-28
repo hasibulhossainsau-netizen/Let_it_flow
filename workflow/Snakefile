@@ -1,0 +1,198 @@
+# workflow/Snakefile
+# ─────────────────────────────────────────────────────────────────────────────
+# Full gRNA pipeline: from raw genome to final ranked Excel report
+# Run: snakemake --cores 4 --use-conda
+# ─────────────────────────────────────────────────────────────────────────────
+
+configfile: "config/config.yaml"
+
+GENOME  = config["genome_fasta"]
+TARGET  = config["target_gene_fasta"]
+MAX_MM  = config["max_mismatches"]
+THREADS = config["threads"]
+PREFIX  = config["output_prefix"]
+
+rule all:
+    input:
+        f"results/{PREFIX}_final.csv",
+        f"results/{PREFIX}_final.xlsx"
+
+# ── Rule 1: Validate inputs ──────────────────────────────────────────────────
+rule validate_inputs:
+    input:
+        genome = GENOME,
+        gene   = TARGET
+    output:
+        touch("logs/validate_done.flag")
+    log:
+        "logs/01_validate.log"
+    shell:
+        "python scripts/01_validate_inputs.py > {log} 2>&1"
+
+# ── Rule 2: PAM scanning ─────────────────────────────────────────────────────
+rule pam_finder:
+    input:
+        target = TARGET,
+        flag   = "logs/validate_done.flag"
+    output:
+        raw = "data/processed/candidate_grnas_raw.csv"
+    log:
+        "logs/02_pam_finder.log"
+    shell:
+        """
+        python scripts/02_pam_finder.py \
+            --target {input.target} \
+            --output {output.raw} > {log} 2>&1
+        """
+
+# ── Rule 3: Pre-filter + seed GC ─────────────────────────────────────────────
+rule filter_grnas:
+    input:
+        raw = "data/processed/candidate_grnas_raw.csv"
+    output:
+        filtered = "data/processed/candidate_grnas_filtered.csv"
+    log:
+        "logs/02b_filter.log"
+    shell:
+        "python scripts/02b_inspect_candidates.py > {log} 2>&1"
+
+# ── Rule 4: Build BLAST DB ────────────────────────────────────────────────────
+rule blast_db:
+    input:
+        genome = GENOME
+    output:
+        multiext("data/processed/genome_db/kpneu_genome",
+                 ".nhr", ".nin", ".nsq")
+    log:
+        "logs/03_blastdb.log"
+    shell:
+        """
+        makeblastdb \
+            -in {input.genome} \
+            -dbtype nucl \
+            -out data/processed/genome_db/kpneu_genome \
+            -title "Klebsiella_genome" > {log} 2>&1
+        """
+
+# ── Rule 5: Cas-OFFinder prep + run ──────────────────────────────────────────
+rule casoffinder:
+    input:
+        filtered = "data/processed/candidate_grnas_filtered.csv",
+        genome   = GENOME
+    output:
+        co_input  = "data/processed/casoffinder_input.txt",
+        co_result = "data/processed/casoffinder_results.txt"
+    log:
+        "logs/04_casoffinder.log"
+    params:
+        mm = MAX_MM
+    shell:
+        """
+        python scripts/03_casoffinder_prep.py \
+            --input  {input.filtered} \
+            --genome {input.genome} \
+            --output {output.co_input} \
+            --mm     {params.mm} >> {log} 2>&1
+
+        cas-offinder {output.co_input} C {output.co_result} >> {log} 2>&1
+        """
+
+# ── Rule 6: Parse Cas-OFFinder ───────────────────────────────────────────────
+rule parse_offtargets:
+    input:
+        casoff   = "data/processed/casoffinder_results.txt",
+        filtered = "data/processed/candidate_grnas_filtered.csv"
+    output:
+        merged = "data/processed/grnas_with_offtargets.csv"
+    log:
+        "logs/05_offtargets.log"
+    shell:
+        """
+        python scripts/04_parse_offtargets.py \
+            --casoff {input.casoff} \
+            --grnas  {input.filtered} \
+            --output {output.merged} > {log} 2>&1
+        """
+
+# ── Rule 7: BLAST cross-validation ───────────────────────────────────────────
+rule blast_screen:
+    input:
+        filtered = "data/processed/candidate_grnas_filtered.csv",
+        db       = "data/processed/genome_db/kpneu_genome.nhr"
+    output:
+        fa     = "data/processed/grna_queries.fasta",
+        blast  = "data/processed/blast_results.tsv",
+        merged = "data/processed/grnas_blast_annotated.csv"
+    log:
+        "logs/06_blast.log"
+    threads: THREADS
+    shell:
+        """
+        python3 -c "
+import pandas as pd
+df = pd.read_csv('{input.filtered}')
+df = df[df['pre_filter_pass']]
+with open('{output.fa}', 'w') as f:
+    for _, row in df.iterrows():
+        f.write(f\">{{row['grna_id']}}\\n{{row['spacer']}}\\n\")
+" >> {log} 2>&1
+
+        blastn \
+            -query   {output.fa} \
+            -db      data/processed/genome_db/kpneu_genome \
+            -out     {output.blast} \
+            -outfmt  "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore" \
+            -word_size 7 -perc_identity 80 \
+            -num_threads {threads} -task blastn-short >> {log} 2>&1
+
+        python scripts/05_parse_blast.py \
+            --blast  {output.blast} \
+            --grnas  data/processed/grnas_with_offtargets.csv \
+            --output {output.merged} >> {log} 2>&1
+        """
+
+# ── Rule 8: RNAfold scoring ───────────────────────────────────────────────────
+rule rnafold_score:
+    input:
+        grnas = "data/processed/grnas_blast_annotated.csv"
+    output:
+        scored = "data/processed/grnas_rnafold.csv"
+    log:
+        "logs/07_rnafold.log"
+    shell:
+        """
+        python scripts/06_rnafold_score.py \
+            --grnas  {input.grnas} \
+            --output {output.scored} > {log} 2>&1
+        """
+
+# ── Rule 9: Final composite scoring + ranking ──────────────────────────────────
+rule rank_grnas:
+    input:
+        grnas = "data/processed/grnas_rnafold.csv"
+    output:
+        ranked = "data/processed/grnas_ranked.csv"
+    log:
+        "logs/08_ranking.log"
+    shell:
+        """
+        python scripts/07_score_and_rank.py \
+            --grnas  {input.grnas} \
+            --output {output.ranked} > {log} 2>&1
+        """
+
+# ── Rule 10: Export final formatted report ─────────────────────────────────────
+rule export_final:
+    input:
+        ranked = "data/processed/grnas_ranked.csv"
+    output:
+        csv  = f"results/{PREFIX}_final.csv",
+        xlsx = f"results/{PREFIX}_final.xlsx"
+    log:
+        "logs/09_export.log"
+    shell:
+        """
+        python scripts/08_export_final.py \
+            --input  {input.ranked} \
+            --output results/{PREFIX}_final > {log} 2>&1
+        """

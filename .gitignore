@@ -1,0 +1,50 @@
+# =============================================================================
+# Snakemake & Pipeline Runtime Data
+# =============================================================================
+.snakemake/
+logs/
+*.flag
+*.log
+
+# =============================================================================
+# Heavy Biological Data (Raw & Intermediate Cache)
+# =============================================================================
+# Ignore all fasta, gbk, and tsv files in raw data except our small target gene
+data/raw/*.fasta
+data/raw/*.gbk
+data/raw/*.fna
+data/raw/*.fa
+!data/raw/blaCTX-M-15_ref.fasta
+
+# Ignore all intermediate processed cache
+data/processed/
+
+# =============================================================================
+# Local Tools & Executables
+# =============================================================================
+tools/
+*.zip
+*.tar.gz
+*.exe
+
+# =============================================================================
+# Python Environment & Cache
+# =============================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.conda/
+.env/
+venv/
+grna_env/
+
+# =============================================================================
+# OS & IDE Specific Files
+# =============================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
