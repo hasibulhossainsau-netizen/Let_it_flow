@@ -7,6 +7,12 @@ logs/
 *.log
 
 # =============================================================================
+# Pipeline Outputs / Results
+# =============================================================================
+# Ignore local results (expected results are safely in example_output/)
+results/
+
+# =============================================================================
 # Heavy Biological Data (Raw & Intermediate Cache)
 # =============================================================================
 # Ignore all fasta, gbk, and tsv files in raw data except our small target gene
