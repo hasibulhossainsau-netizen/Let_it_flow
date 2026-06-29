@@ -117,8 +117,9 @@ rule parse_offtargets:
 # ── Rule 7: BLAST cross-validation ───────────────────────────────────────────
 rule blast_screen:
     input:
-        filtered = "data/processed/candidate_grnas_filtered.csv",
-        db       = "data/processed/genome_db/kpneu_genome.nhr"
+        filtered   = "data/processed/candidate_grnas_filtered.csv",
+        db         = "data/processed/genome_db/kpneu_genome.nhr",
+        offtargets = "data/processed/grnas_with_offtargets.csv"
     output:
         fa     = "data/processed/grna_queries.fasta",
         blast  = "data/processed/blast_results.tsv",
@@ -128,15 +129,12 @@ rule blast_screen:
     threads: THREADS
     shell:
         """
-        python3 -c "
-import pandas as pd
-df = pd.read_csv('{input.filtered}')
-df = df[df['pre_filter_pass']]
-with open('{output.fa}', 'w') as f:
-    for _, row in df.iterrows():
-        f.write(f\">{{row['grna_id']}}\\n{{row['spacer']}}\\n\")
-" >> {log} 2>&1
+        # নতুন স্ক্রিপ্ট দিয়ে ফাস্টা ফাইল তৈরি
+        python scripts/04b_generate_fasta.py \
+            --input {input.filtered} \
+            --output {output.fa} >> {log} 2>&1
 
+        # ব্লাস্ট রান করা
         blastn \
             -query   {output.fa} \
             -db      data/processed/genome_db/kpneu_genome \
@@ -145,9 +143,10 @@ with open('{output.fa}', 'w') as f:
             -word_size 7 -perc_identity 80 \
             -num_threads {threads} -task blastn-short >> {log} 2>&1
 
+        # ব্লাস্ট রেজাল্ট পার্স করা
         python scripts/05_parse_blast.py \
             --blast  {output.blast} \
-            --grnas  data/processed/grnas_with_offtargets.csv \
+            --grnas  {input.offtargets} \
             --output {output.merged} >> {log} 2>&1
         """
 
