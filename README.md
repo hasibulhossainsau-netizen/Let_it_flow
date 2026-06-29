@@ -65,13 +65,13 @@ Ensure you have Miniconda/Anaconda installed on a Linux/WSL environment. The cor
 
    ```bash
    git clone https://github.com/hasibulhossainsau-netizen/Let_it_flow.git
-   cd grna_pipeline
+   cd Let_it_flow
    ```
 
 2. Activate your target Conda environment containing your pipeline dependencies:
 
    ```bash
-   conda activate grna_env
+   conda activate <env_name>
    ```
 
 3. Perform a dry-run to inspect the Directed Acyclic Graph (DAG) of jobs:
