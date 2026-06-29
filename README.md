@@ -101,6 +101,7 @@ Ensure you have Miniconda/Anaconda installed on a Linux/WSL environment. The cor
 │   ├── 02b_inspect_candidates.py # Size & primary composition check
 │   ├── 03_casoffinder_prep.py  # Generation of Cas-OFFinder inputs
 │   ├── 04_parse_offtargets.py  # Processing Cas-OFFinder alignment hits
+|   ├── 04b_generate_fasta      # gerates required fasta files
 │   ├── 05_parse_blast.py       # Short-read sequence homology filtering
 │   ├── 06_rnafold_score.py     # Secondary structure thermodynamic calculations
 │   ├── 07_composite_scorer.py  # Multi-criteria scoring and candidate ranking
