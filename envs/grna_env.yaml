@@ -16,5 +16,3 @@ dependencies:
   - jupyter
   - seaborn
   - pip
-  - pip:
-    - cas-offinder
