@@ -64,7 +64,7 @@ Ensure you have Miniconda/Anaconda installed on a Linux/WSL environment. The cor
 1. Clone the repository and navigate into the workspace:
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/grna_pipeline.git
+   git clone https://github.com/hasibulhossainsau-netizen/Let_it_flow.git
    cd grna_pipeline
    ```
 
