@@ -9,82 +9,75 @@ Usage:
         --output data/processed/grnas_rnafold.csv
 """
 
-import subprocess
-import re
-import pandas as pd
 import argparse
-import tempfile
-import os
 
-# Partial sgRNA scaffold (first 20 nt; full structure modelling)
-SCAFFOLD = "GTTTTAGAGCTAGAAATAGCAAGTTAAAATAAGGCTAGTCCG"
+import pandas as pd
 
-def run_rnafold(spacer: str) -> tuple[float, str]:
-    """
-    Fold spacer+scaffold with RNAfold.
-    Returns (MFE float, dot-bracket structure string).
-    """
-    rna_seq = spacer.replace("T", "U") + SCAFFOLD.replace("T", "U")
+# ``utils`` must be imported first: it puts the repo root on sys.path so that
+# ``interfaces`` (a top-level package) can be found.
+from utils.config import load_config
+from utils.dataframe import require_columns
+from utils.runtime import event, get_logger, init_script, run_main
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.fa',
-                                     delete=False) as tmp:
-        tmp.write(f">grna\n{rna_seq}\n")
-        tmp_path = tmp.name
+from interfaces import get_structure_predictor  # noqa: E402
+from scoring_metrics import mfe_score  # noqa: E402
 
+
+log = get_logger("06_rnafold_score")
+
+
+def fold_spacer(predictor, spacer: str, scaffold: str):
+    """Fold spacer+scaffold; returns (MFE, structure) or (0.0, "") on failure."""
+    rna_seq = spacer.replace("T", "U") + scaffold.replace("T", "U")
     try:
-        result = subprocess.run(
-            ["RNAfold", "--noPS", tmp_path],
-            capture_output=True, text=True, timeout=30
-        )
-        output = result.stdout.strip().split("\n")
-        # Last line: structure  (MFE)
-        last = output[-1] if output else ""
-        match = re.search(r'\((-?\d+\.\d+)\)', last)
-        mfe   = float(match.group(1)) if match else 0.0
-        struct = last.split()[0] if last else ""
-        return mfe, struct
-    except Exception as e:
-        print(f"[WARN] RNAfold failed for {spacer[:8]}...: {e}")
+        return predictor.predict(rna_seq)
+    except RuntimeError as err:
+        event(log, "WARNING", "structure prediction failed",
+              spacer_prefix=spacer[:8], error=str(err))
         return 0.0, ""
-    finally:
-        os.unlink(tmp_path)
 
-def mfe_score(mfe: float) -> float:
-    """
-    Convert MFE to efficiency score contribution (0–1 scale).
-    MFE closer to 0 = less structure = better. 
-    Typical range: -30 to 0 kcal/mol.
-    """
-    clipped = max(mfe, -30.0)
-    return round(1.0 - (abs(clipped) / 30.0), 3)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--grnas",  required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--config", default="config/config.yaml")
     args = parser.parse_args()
 
+    cfg = load_config(args.config)
+    struct_cfg = cfg["structure"]
+    predictor = get_structure_predictor(cfg)
+    init_script(log, args, cfg, {"grnas": args.grnas},
+                tools={predictor.name: predictor})
+
     df = pd.read_csv(args.grnas)
+    require_columns(df, ["spacer", "pre_filter_pass"], args.grnas)
     df = df[df["pre_filter_pass"] == True].copy()
 
-    print(f"[INFO] Running RNAfold on {len(df)} gRNAs...")
+    event(log, "INFO", "running structure prediction", n_grnas=len(df),
+          predictor=predictor.name)
     mfe_vals, struct_vals, mfe_scores = [], [], []
 
     for i, (_, row) in enumerate(df.iterrows()):
-        mfe, struct = run_rnafold(row["spacer"])
+        mfe, struct = fold_spacer(predictor, row["spacer"],
+                                  struct_cfg["scaffold"])
         mfe_vals.append(mfe)
         struct_vals.append(struct[:40] if struct else "")
-        mfe_scores.append(mfe_score(mfe))
+        mfe_scores.append(mfe_score(mfe, struct_cfg["mfe_floor"],
+                                    struct_cfg["mfe_score_decimals"]))
         if (i + 1) % 10 == 0:
-            print(f"  Processed {i+1}/{len(df)}...")
+            event(log, "INFO", "progress", done=i + 1, total=len(df))
 
     df["mfe_kcal"]   = mfe_vals
     df["structure"]  = struct_vals
     df["mfe_score"]  = mfe_scores   # 0–1 scale; higher = better
 
     df.to_csv(args.output, index=False)
-    print(f"[OK] RNAfold scores written to: {args.output}")
-    print(df[["spacer","mfe_kcal","mfe_score"]].head(10).to_string(index=False))
+    n_failed = sum(1 for s in struct_vals if not s)
+    event(log, "WARNING" if n_failed else "INFO", "RNAfold scores written",
+          output=args.output, rows=len(df), failed_predictions=n_failed)
+    log.info("first rows:\n%s",
+             df[["spacer","mfe_kcal","mfe_score"]].head(10).to_string(index=False))
 
 if __name__ == "__main__":
-    main()
+    run_main(main, "06_rnafold_score")

@@ -1,0 +1,7 @@
+# MD5 manifest for pipeline inputs (md5sum format: "<md5>  <path>").
+# Every genome / gene FASTA used by the pipeline MUST be listed here, otherwise
+# the checksum_verify rule fails. Paths are relative to the repo root.
+#
+# TODO: add the genome (not in the repo), then re-run:
+#   md5sum data/raw/kpneumoniae_HS11286_genome.fasta >> data/raw/checksums.md5
+6da91f77e22e780305b7802f26589dee  data/raw/blaCTX-M-15_ref.fasta

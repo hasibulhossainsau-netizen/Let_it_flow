@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Unit tests + static/validation checks (fast, ~2 min) ────────────────
+  unit-and-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the pinned environment (envs/crispr_pipeline.yaml)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: envs/crispr_pipeline.yaml
+          environment-name: crispr_pipeline
+          cache-environment: true
+          init-shell: bash
+
+      - name: Unit tests
+        shell: bash -el {0}
+        run: pytest tests/unit tests/test_toy_fixtures.py -v
+
+      - name: Validate configuration files against config/schema.yaml
+        shell: bash -el {0}
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from utils.config import load_config
+          for path in ("config/config.yaml", "tests/data/toy/config.yaml"):
+              cfg = load_config(path)
+              print(f"OK {path}: genes={list(cfg.get('genes', {})) or '(single-gene mode)'}")
+          PY
+
+      - name: Static checks (syntax, shell, workflow dry-run)
+        shell: bash -el {0}
+        run: |
+          python -m compileall -q scripts interfaces tests
+          bash -n scripts/run_guarded.sh
+          # Dry-run the full DAG on the toy layout (blocking)
+          python tests/toy_workdir.py "$RUNNER_TEMP/toy"
+          cd "$RUNNER_TEMP/toy" && snakemake -n
+
+      - name: Snakemake lint (informational, does not fail the build)
+        shell: bash -el {0}
+        continue-on-error: true
+        run: cd "$RUNNER_TEMP/toy" && snakemake --lint
+
+  # ── 2. Integration test: toy genome through the real workflow ──────────────
+  #       runs `snakemake --cores 1 --use-conda` (rule env built by Snakemake)
+  integration:
+    runs-on: ubuntu-24.04
+    needs: unit-and-validation
+    timeout-minutes: 60
+    env:
+      GRNA_CONDA_PREFIX: ${{ github.workspace }}/.ci-conda-envs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install conda + the pinned environment (provides snakemake and pytest)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: envs/crispr_pipeline.yaml
+          activate-environment: crispr_pipeline
+          channel-priority: strict
+          conda-remove-defaults: "true"
+
+      - name: Cache Snakemake's per-rule conda environment
+        uses: actions/cache@v4
+        with:
+          path: .ci-conda-envs
+          key: snakemake-conda-${{ runner.os }}-${{ hashFiles('envs/crispr_pipeline.yaml') }}
+
+      - name: Toy integration test (snakemake --cores 1 --use-conda)
+        shell: bash -el {0}
+        run: pytest tests/integration -v
+
+      - name: Upload workflow logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toy-run-logs
+          path: |
+            /tmp/pytest-of-runner/**/logs/**
+            /tmp/pytest-of-runner/**/.snakemake/log/**
+          if-no-files-found: ignore
+
+  # ── 3. Container: build the Docker image and run the whole test-suite in it ─
+  container:
+    runs-on: ubuntu-24.04
+    needs: unit-and-validation
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t crispr-pipeline:ci .
+
+      - name: Run unit + integration tests inside the image (tools already installed)
+        run: |
+          docker run --rm -e GRNA_IT_USE_CONDA=0 -e HOME=/tmp \
+            --user "$(id -u):$(id -g)" -v "$PWD":/pipeline -w /pipeline \
+            crispr-pipeline:ci pytest tests -v -p no:cacheprovider

@@ -1,6 +1,141 @@
 # config/config.yaml
-genome_fasta:    "data/raw/kpneumoniae_HS11286_genome.fasta"
+# -----------------------------------------------------------------------------
+# Single source of truth for every tunable value in the pipeline.
+# Validated against config/schema.yaml. Any section omitted here falls back to
+# the defaults declared in the schema (backward compatible with old 5-key
+# configs). Defaults reproduce the pre-refactoring behaviour exactly.
+# -----------------------------------------------------------------------------
+
+# ── Inputs / run settings (original keys, unchanged) ─────────────────────────
+genome_fasta:      "data/raw/kpneumoniae_HS11286_genome.fasta"
 target_gene_fasta: "data/raw/blaCTX-M-15_ref.fasta"
-max_mismatches:  3
-threads:         4
-output_prefix:   "blaCTX-M-15_gRNA_results"
+max_mismatches:    3
+threads:           4
+seed:              42       # seeds Python `random` and NumPy in every script
+output_prefix:     "blaCTX-M-15_gRNA_results"
+
+# ── Multi-gene routing (optional) ────────────────────────────────────────────
+# {gene_name: fasta}. Each key is a value of the {gene} wildcard; outputs land in
+# results/<gene_name>_final.{csv,xlsx}. If this block is omitted, one gene named
+# after output_prefix is derived from target_gene_fasta (previous behaviour).
+# genes:
+#   blaCTX-M-15: "data/raw/blaCTX-M-15_ref.fasta"
+#   blaNDM-1:    "data/raw/blaNDM-1_ref.fasta"
+
+# MD5 manifest (md5sum format) that must list the genome AND every gene FASTA.
+checksums_file:    "data/raw/checksums.md5"
+
+# ── Tool selection (plugin architecture; see interfaces/) ────────────────────
+tools:
+  off_target_searchers: ["cas-offinder", "blastn"]   # implementations to run
+  structure_predictor:  "rnafold"
+  cas_offinder_device:  "C"       # C = CPU, G = GPU
+  rnafold_timeout_s:    30
+
+# ── Input validation ─────────────────────────────────────────────────────────
+validation:
+  min_genome_length: 1000000
+  min_gene_length:   700            # per record; shorter targets are rejected
+  max_genome_ambiguous_fraction: 0.01   # IUPAC/N bases tolerated in the genome
+
+# ── Guide design: PAM, spacer, seed, pre-filters ─────────────────────────────
+guide:
+  spacer_length:   20
+  # Regex used on the (upper-cased) strand sequence; group 1 is the spacer.
+  # SpCas9 PAM = NGG: 20-nt spacer, then ANY base, then GG. The reported PAM is
+  # the 3 nt (pam_length) right after the spacer. The "20" must equal
+  # spacer_length. (Before v2 this was '(?=(.{20})GG)', which matched GGN and
+  # shifted every spacer by one base; see REFACTORING_REPORT.md, section 4.)
+  pam_regex:       '(?=(.{20}).GG)'
+  pam_length:      3
+  cas_offinder_pam: "NGG"         # PAM pattern written to Cas-OFFinder input
+  gc_min:          0.40
+  gc_max:          0.75
+  max_homopolymer: 5              # reject spacers with a run >= this length
+  seed_length:     12             # PAM-proximal seed region (nt)
+  seed_min_gc:     0.40
+
+# ── BLAST cross-validation ───────────────────────────────────────────────────
+blast:
+  task:           "blastn-short"
+  word_size:      7
+  perc_identity:  80
+  outfmt:         "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
+  # Parsing thresholds (05_parse_blast.py)
+  min_pident:            85
+  min_length:            15
+  on_target_length:      20
+  on_target_min_pident:  95
+
+# ── RNA structure scoring ────────────────────────────────────────────────────
+structure:
+  scaffold:  "GTTTTAGAGCTAGAAATAGCAAGTTAAAATAAGGCTAGTCCG"
+  mfe_floor: -30.0                # MFE values below this are clipped
+  mfe_score_decimals: 3
+
+# ── Composite scoring ────────────────────────────────────────────────────────
+scoring:
+  weights:                        # must sum to 1.0
+    gc:         0.25
+    seed_gc:    0.20
+    mfe:        0.25
+    off_target: 0.30
+  gc_curve:
+    optimal_min:   0.50           # score 1.0 within [optimal_min, optimal_max]
+    optimal_max:   0.65
+    lower_bound:   0.40
+    upper_bound:   0.75
+    lower_base:    0.70           # score at lower_bound
+    lower_slope:   3.0
+    upper_slope:   5.0
+    out_of_range:  0.30
+  seed_full_score_gc: 0.5         # seed GC at/above which seed score = 1.0
+  # (max total off-targets, score) evaluated in order; fallback if none match.
+  off_target_scores:
+    - {max_hits: 0,  score: 1.00}
+    - {max_hits: 1,  score: 0.85}
+    - {max_hits: 2,  score: 0.65}
+    - {max_hits: 5,  score: 0.45}
+    - {max_hits: 10, score: 0.25}
+  off_target_fallback_score: 0.05
+  verdict:
+    reject_total_offtargets_above: 10
+    top_candidate_min: 0.75
+    candidate_min:     0.55
+    marginal_min:      0.35
+  missing_column_defaults:        # used when an upstream column is absent
+    seed_gc:              0.5
+    mfe_score:            0.5
+    total_offtargets:     0
+    ot_0mm_adjusted:      0
+    blast_offtarget_hits: 0
+  score_decimals: 4
+
+# ── Export ───────────────────────────────────────────────────────────────────
+export:
+  sheet_name: "gRNA_Results"
+  columns:
+    - rank
+    - grna_id
+    - spacer
+    - pam
+    - strand
+    - position_nt
+    - gc_content
+    - seed_gc
+    - mfe_kcal
+    - mfe_score
+    - ot_0mm_adjusted
+    - ot_1mm
+    - ot_2mm
+    - ot_3mm
+    - total_offtargets
+    - blast_offtarget_hits
+    - efficiency_score
+    - verdict
+  colors:                         # ARGB/RGB hex fills
+    header:        "4472C4"
+    top_candidate: "C6EFCE"
+    candidate:     "FFEB9C"
+    marginal:      "FFCC99"
+    reject:        "FFC7CE"

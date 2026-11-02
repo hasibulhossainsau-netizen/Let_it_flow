@@ -1,196 +1,423 @@
 # workflow/Snakefile
 # ─────────────────────────────────────────────────────────────────────────────
-# Full gRNA pipeline: from raw genome to final ranked Excel report
-# Run: snakemake --cores 4 --use-conda
+# gRNA pipeline: raw genome + target gene(s) -> ranked Excel/CSV report per gene
+# Run:  snakemake --cores 4 --use-conda
+#
+# Layout
+#   global steps (once per run)  : checksum_verify, validate_genome, blast_db
+#   per-gene steps ({gene})      : everything else, under data/processed/{gene}/
+#   post-step sanity checks      : validate_stage  -> logs/{gene}/checks/{stage}.ok
+#                                  (downstream rules consume the .ok flag, so a
+#                                  bad intermediate stops the DAG immediately)
+#   external tools (retries: 3)  : casoffinder_run, blast_run, rnafold_score
+#   logs                         : logs/<rule>/<gene>.log (global rules: all.log)
+#                                  = JSON-lines records + raw tool stderr;
+#                                  sentinel flags live in logs/flags/
 # ─────────────────────────────────────────────────────────────────────────────
 
-configfile: "config/config.yaml"
+import os
+import re
+from snakemake.utils import validate
 
-GENOME  = config["genome_fasta"]
-TARGET  = config["target_gene_fasta"]
-MAX_MM  = config["max_mismatches"]
-THREADS = config["threads"]
-PREFIX  = config["output_prefix"]
+configfile: "config/config.yaml"
+# Schema path is anchored to the Snakefile so it works from any cwd/-s path.
+validate(config, os.path.join(workflow.basedir, "..", "config", "schema.yaml"))  # fills defaults
+
+CFG       = "config/config.yaml"
+GENOME    = config["genome_fasta"]
+TARGET    = config["target_gene_fasta"]
+MAX_MM    = config["max_mismatches"]
+THREADS   = config["threads"]
+PREFIX    = config["output_prefix"]
+BLAST     = config["blast"]
+DEVICE    = config["tools"]["cas_offinder_device"]
+CHECKSUMS = config.get("checksums_file", "data/raw/checksums.md5")
+
+# {gene_name: fasta}. Falls back to the single legacy gene so that old configs
+# keep producing results/<output_prefix>_final.{csv,xlsx}.
+GENES = dict(config["genes"]) if config.get("genes") else {PREFIX: TARGET}
+
+DB_PREFIX = f"data/processed/genome_db/{PREFIX}"
+PROC      = "data/processed/{gene}"
+FLAGS     = "logs/flags/{gene}"
+# One pinned environment for every rule (also what the Docker/Singularity images use).
+ENV       = "../envs/crispr_pipeline.yaml"
+ENV_CO    = ENV
+
+# Fail-fast wrapper: appends to the log, reports the exit code and dumps the
+# log tail to the console on failure (see scripts/run_guarded.sh).
+GUARD = "bash scripts/run_guarded.sh"
+
+wildcard_constraints:
+    gene  = "|".join(re.escape(g) for g in GENES),
+    stage = ("candidates_raw|candidates_filtered|offtargets|blast_annotated|"
+             "rnafold|ranked|casoffinder_results|blast_queries|blast_results|"
+             "final_csv|final_xlsx")
+
+def gene_fasta(wildcards):
+    return GENES[wildcards.gene]
+
+# Resources grow with the retry attempt (e.g. an OOM-killed tool gets more RAM).
+def mem(base_mb):
+    return lambda wildcards, attempt: base_mb * attempt
+
+def runtime(base_min):
+    return lambda wildcards, attempt: base_min * attempt
+
+# Files that get a post-step sanity check, keyed by the {stage} wildcard.
+CHECKED = {
+    "candidates_raw":      PROC + "/candidate_grnas_raw.csv",
+    "candidates_filtered": PROC + "/candidate_grnas_filtered.csv",
+    "casoffinder_results": PROC + "/casoffinder_results.txt",
+    "offtargets":          PROC + "/grnas_with_offtargets.csv",
+    "blast_queries":       PROC + "/grna_queries.fasta",
+    "blast_results":       PROC + "/blast_results.tsv",
+    "blast_annotated":     PROC + "/grnas_blast_annotated.csv",
+    "rnafold":             PROC + "/grnas_rnafold.csv",
+    "ranked":              PROC + "/grnas_ranked.csv",
+    "final_csv":           "results/{gene}_final.csv",
+    "final_xlsx":          "results/{gene}_final.xlsx",
+}
+
+def ok(stage):
+    """Flag file written by validate_stage once `stage` passed its checks."""
+    return f"{FLAGS}/checks/{stage}.ok"
+
 
 rule all:
     input:
-        f"results/{PREFIX}_final.csv",
-        f"results/{PREFIX}_final.xlsx"
+        expand("results/{gene}_final.csv",  gene=GENES),
+        expand("results/{gene}_final.xlsx", gene=GENES),
+        expand(ok("final_csv"),  gene=GENES),
+        expand(ok("final_xlsx"), gene=GENES)
 
-# ── Rule 1: Validate inputs ──────────────────────────────────────────────────
-rule validate_inputs:
+# ═════════════════════════════════════════════════════════════════════════════
+# Data integrity + input validation
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Checksum verification of every raw input (genome + all genes) ────────────
+rule checksum_verify:
+    input:
+        sums   = CHECKSUMS,
+        genome = GENOME,
+        genes  = list(GENES.values())
+    output:
+        touch("logs/flags/checksum_verify.ok")
+    log:
+        "logs/checksum_verify/all.log"
+    threads: 1
+    resources:
+        mem_mb  = 500,
+        runtime = 10
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/verify_checksums.py "
+        "--checksums {input.sums} --files {input.genome} {input.genes}"
+
+rule validate_genome:
     input:
         genome = GENOME,
-        gene   = TARGET
+        cfg    = CFG,
+        chk    = "logs/flags/checksum_verify.ok"
     output:
-        touch("logs/validate_done.flag")
+        touch("logs/flags/validate_genome.ok")
     log:
-        "logs/01_validate.log"
+        "logs/validate_genome/all.log"
+    threads: 1
+    resources:
+        mem_mb  = 2000,
+        runtime = 10
+    conda: ENV
     shell:
-        "python scripts/01_validate_inputs.py > {log} 2>&1"
+        "{GUARD} {log} python scripts/01_validate_inputs.py "
+        "--config {input.cfg} --only genome --genome {input.genome}"
 
-# ── Rule 2: PAM scanning ─────────────────────────────────────────────────────
+rule validate_gene:
+    input:
+        gene = gene_fasta,
+        cfg  = CFG,
+        chk  = "logs/flags/checksum_verify.ok"
+    output:
+        touch(FLAGS + "/validate_gene.ok")
+    log:
+        "logs/validate_gene/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 500,
+        runtime = 5
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/01_validate_inputs.py "
+        "--config {input.cfg} --only gene --gene {input.gene}"
+
+# ── Generic post-step sanity check (non-empty, schema, zero NaN in keys) ─────
+rule validate_stage:
+    input:
+        data = lambda wc: CHECKED[wc.stage].format(gene=wc.gene),
+        cfg  = CFG
+    output:
+        touch(FLAGS + "/checks/{stage}.ok")
+    log:
+        "logs/validate_stage/{gene}.{stage}.log"
+    threads: 1
+    resources:
+        mem_mb  = 1000,
+        runtime = 5
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/validate_outputs.py "
+        "--stage {wildcards.stage} --input {input.data} --config {input.cfg}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Guide design
+# ═════════════════════════════════════════════════════════════════════════════
+
 rule pam_finder:
     input:
-        target = TARGET,
-        flag   = "logs/validate_done.flag"
+        target = gene_fasta,
+        cfg    = CFG,
+        genome = "logs/flags/validate_genome.ok",
+        gene   = FLAGS + "/validate_gene.ok"
     output:
-        raw = "data/processed/candidate_grnas_raw.csv"
+        raw = PROC + "/candidate_grnas_raw.csv"
     log:
-        "logs/02_pam_finder.log"
+        "logs/pam_finder/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 1000,
+        runtime = 10
+    conda: ENV
     shell:
-        """
-        python scripts/02_pam_finder.py \
-            --target {input.target} \
-            --output {output.raw} > {log} 2>&1
-        """
+        "{GUARD} {log} python scripts/02_pam_finder.py "
+        "--target {input.target} --config {input.cfg} --output {output.raw}"
 
-# ── Rule 3: Pre-filter + seed GC ─────────────────────────────────────────────
 rule filter_grnas:
     input:
-        raw = "data/processed/candidate_grnas_raw.csv"
+        raw = PROC + "/candidate_grnas_raw.csv",
+        chk = ok("candidates_raw")
     output:
-        filtered = "data/processed/candidate_grnas_filtered.csv"
+        filtered = PROC + "/candidate_grnas_filtered.csv"
     log:
-        "logs/02b_filter.log"
+        "logs/filter_grnas/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 1000,
+        runtime = 5
+    conda: ENV
     shell:
-        "python scripts/02b_inspect_candidates.py > {log} 2>&1"
+        "{GUARD} {log} python scripts/02b_inspect_candidates.py "
+        "--input {input.raw} --output {output.filtered}"
 
-# ── Rule 4: Build BLAST DB ────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# Off-target search A: BLAST (DB once, then per-gene fasta -> blastn -> parse)
+# ═════════════════════════════════════════════════════════════════════════════
+
 rule blast_db:
     input:
-        genome = GENOME
+        genome = GENOME,
+        chk    = "logs/flags/validate_genome.ok"
     output:
-        multiext(f"data/processed/genome_db/{PREFIX}", ".nhr", ".nin", ".nsq")
+        ensure(f"{DB_PREFIX}.nhr", non_empty=True),
+        ensure(f"{DB_PREFIX}.nin", non_empty=True),
+        ensure(f"{DB_PREFIX}.nsq", non_empty=True)
     log:
-        "logs/03_blastdb.log"
+        "logs/blast_db/all.log"
+    threads: 1
+    resources:
+        mem_mb  = 4000,
+        runtime = 30
+    conda: ENV
     shell:
-        """
-        makeblastdb \
-            -in {input.genome} \
-            -dbtype nucl \
-            -out data/processed/genome_db/{PREFIX} \
-            -title "{PREFIX}_genome" > {log} 2>&1
-        """
+        "VERSION_CMD='makeblastdb -version' {GUARD} {log} makeblastdb -in {input.genome} -dbtype nucl "
+        "-out {DB_PREFIX} -title {PREFIX}_genome"
 
-# ── Rule 5: Cas-OFFinder prep + run ──────────────────────────────────────────
-rule casoffinder:
+rule blast_fasta:
     input:
-        filtered = "data/processed/candidate_grnas_filtered.csv",
-        genome   = GENOME
+        filtered = PROC + "/candidate_grnas_filtered.csv",
+        chk      = ok("candidates_filtered")
     output:
-        co_input  = "data/processed/casoffinder_input.txt",
-        co_result = "data/processed/casoffinder_results.txt"
+        fa = PROC + "/grna_queries.fasta"
     log:
-        "logs/04_casoffinder.log"
+        "logs/blast_fasta/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 500,
+        runtime = 5
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/04b_generate_fasta.py "
+        "--input {input.filtered} --output {output.fa}"
+
+rule blast_run:
+    input:
+        fa  = PROC + "/grna_queries.fasta",
+        chk = ok("blast_queries"),
+        db  = multiext(DB_PREFIX, ".nhr", ".nin", ".nsq")
+    output:
+        blast = PROC + "/blast_results.tsv"
+    log:
+        "logs/blast_run/{gene}.log"
+    retries: 3
+    threads: THREADS
+    params:
+        outfmt        = BLAST["outfmt"],
+        word_size     = BLAST["word_size"],
+        perc_identity = BLAST["perc_identity"],
+        task          = BLAST["task"]
+    resources:
+        mem_mb  = mem(4000),
+        runtime = runtime(60)
+    conda: ENV
+    shell:
+        "VERSION_CMD='blastn -version' {GUARD} {log} blastn -query {input.fa} -db {DB_PREFIX} "
+        "-out {output.blast} -outfmt '{params.outfmt}' "
+        "-word_size {params.word_size} -perc_identity {params.perc_identity} "
+        "-num_threads {threads} -task {params.task}"
+
+rule blast_parse:
+    input:
+        blast      = PROC + "/blast_results.tsv",
+        chk        = ok("blast_results"),
+        offtargets = PROC + "/grnas_with_offtargets.csv",
+        otchk      = ok("offtargets"),
+        cfg        = CFG
+    output:
+        merged = PROC + "/grnas_blast_annotated.csv"
+    log:
+        "logs/blast_parse/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 2000,
+        runtime = 10
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/05_parse_blast.py "
+        "--blast {input.blast} --grnas {input.offtargets} "
+        "--config {input.cfg} --output {output.merged}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Off-target search B: Cas-OFFinder (prep -> run -> parse)
+# ═════════════════════════════════════════════════════════════════════════════
+
+rule casoffinder_prep:
+    input:
+        filtered = PROC + "/candidate_grnas_filtered.csv",
+        chk      = ok("candidates_filtered"),
+        genome   = GENOME,
+        gvalid   = "logs/flags/validate_genome.ok",
+        cfg      = CFG
+    output:
+        co_input = ensure(PROC + "/casoffinder_input.txt", non_empty=True)
+    log:
+        "logs/casoffinder_prep/{gene}.log"
+    threads: 1
     params:
         mm = MAX_MM
+    resources:
+        mem_mb  = 1000,
+        runtime = 5
+    conda: ENV
     shell:
-        """
-        python scripts/03_casoffinder_prep.py \
-            --input  {input.filtered} \
-            --genome {input.genome} \
-            --output {output.co_input} \
-            --mm     {params.mm} >> {log} 2>&1
+        "{GUARD} {log} python scripts/03_casoffinder_prep.py "
+        "--input {input.filtered} --genome {input.genome} "
+        "--output {output.co_input} --config {input.cfg} --mm {params.mm}"
 
-        cas-offinder {output.co_input} C {output.co_result} >> {log} 2>&1
-        """
-
-# ── Rule 6: Parse Cas-OFFinder ───────────────────────────────────────────────
-rule parse_offtargets:
+rule casoffinder_run:
     input:
-        casoff   = "data/processed/casoffinder_results.txt",
-        filtered = "data/processed/candidate_grnas_filtered.csv"
+        co_input = PROC + "/casoffinder_input.txt"
     output:
-        merged = "data/processed/grnas_with_offtargets.csv"
+        co_result = PROC + "/casoffinder_results.txt"
     log:
-        "logs/05_offtargets.log"
-    shell:
-        """
-        python scripts/04_parse_offtargets.py \
-            --casoff {input.casoff} \
-            --grnas  {input.filtered} \
-            --output {output.merged} > {log} 2>&1
-        """
-
-# ── Rule 7: BLAST cross-validation ───────────────────────────────────────────
-rule blast_screen:
-    input:
-        filtered   = "data/processed/candidate_grnas_filtered.csv",
-        db         = f"data/processed/genome_db/{PREFIX}.nhr",
-        offtargets = "data/processed/grnas_with_offtargets.csv"
-    output:
-        fa     = "data/processed/grna_queries.fasta",
-        blast  = "data/processed/blast_results.tsv",
-        merged = "data/processed/grnas_blast_annotated.csv"
-    log:
-        "logs/06_blast.log"
+        "logs/casoffinder_run/{gene}.log"
+    retries: 3
     threads: THREADS
+    params:
+        device = DEVICE
+    resources:
+        mem_mb  = mem(8000),
+        runtime = runtime(120)
+    conda: ENV_CO
     shell:
-        """
-        # নতুন স্ক্রিপ্ট দিয়ে ফাস্টা ফাইল তৈরি
-        python scripts/04b_generate_fasta.py \
-            --input {input.filtered} \
-            --output {output.fa} >> {log} 2>&1
+        "VERSION_CMD='cas-offinder 2>&1 | head -n 1' {GUARD} {log} cas-offinder {input.co_input} {params.device} "
+        "{output.co_result}"
 
-        # ব্লাস্ট রান করা
-        blastn \
-            -query   {output.fa} \
-            -db      data/processed/genome_db/{PREFIX} \
-            -out     {output.blast} \
-            -outfmt  "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore" \
-            -word_size 7 -perc_identity 80 \
-            -num_threads {threads} -task blastn-short >> {log} 2>&1
+rule casoffinder_parse:
+    input:
+        casoff   = PROC + "/casoffinder_results.txt",
+        chk      = ok("casoffinder_results"),
+        filtered = PROC + "/candidate_grnas_filtered.csv"
+    output:
+        merged = PROC + "/grnas_with_offtargets.csv"
+    log:
+        "logs/casoffinder_parse/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 2000,
+        runtime = 10
+    conda: ENV
+    shell:
+        "{GUARD} {log} python scripts/04_parse_offtargets.py "
+        "--casoff {input.casoff} --grnas {input.filtered} --output {output.merged}"
 
-        # ব্লাস্ট রেজাল্ট পার্স করা
-        python scripts/05_parse_blast.py \
-            --blast  {output.blast} \
-            --grnas  {input.offtargets} \
-            --output {output.merged} >> {log} 2>&1
-        """
+# ═════════════════════════════════════════════════════════════════════════════
+# RNA structure, scoring, export
+# ═════════════════════════════════════════════════════════════════════════════
 
-# ── Rule 8: RNAfold scoring ───────────────────────────────────────────────────
+# The script drives RNAfold itself (per-spacer subprocess with a timeout from
+# config), so prep/exec/parse live in one script and therefore one rule.
 rule rnafold_score:
     input:
-        grnas = "data/processed/grnas_blast_annotated.csv"
+        grnas = PROC + "/grnas_blast_annotated.csv",
+        chk   = ok("blast_annotated"),
+        cfg   = CFG
     output:
-        scored = "data/processed/grnas_rnafold.csv"
+        scored = PROC + "/grnas_rnafold.csv"
     log:
-        "logs/07_rnafold.log"
+        "logs/rnafold_score/{gene}.log"
+    retries: 3
+    threads: 1
+    resources:
+        mem_mb  = mem(2000),
+        runtime = runtime(30)
+    conda: ENV
     shell:
-        """
-        python scripts/06_rnafold_score.py \
-            --grnas  {input.grnas} \
-            --output {output.scored} > {log} 2>&1
-        """
+        "VERSION_CMD='RNAfold --version' {GUARD} {log} python scripts/06_rnafold_score.py "
+        "--grnas {input.grnas} --config {input.cfg} --output {output.scored}"
 
-# ── Rule 9: Final composite scoring + ranking ──────────────────────────────────
 rule rank_grnas:
     input:
-        grnas = "data/processed/grnas_rnafold.csv"
+        grnas = PROC + "/grnas_rnafold.csv",
+        chk   = ok("rnafold"),
+        cfg   = CFG
     output:
-        ranked = "data/processed/grnas_ranked.csv"
+        ranked = PROC + "/grnas_ranked.csv"
     log:
-        "logs/08_ranking.log"
+        "logs/rank_grnas/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 1000,
+        runtime = 5
+    conda: ENV
     shell:
-        """
-        python scripts/07_score_and_rank.py \
-            --grnas  {input.grnas} \
-            --output {output.ranked} > {log} 2>&1
-        """
+        "{GUARD} {log} python scripts/rank_candidates.py "
+        "--grnas {input.grnas} --config {input.cfg} --output {output.ranked}"
 
-# ── Rule 10: Export final formatted report ─────────────────────────────────────
 rule export_final:
     input:
-        ranked = "data/processed/grnas_ranked.csv"
+        ranked = PROC + "/grnas_ranked.csv",
+        chk    = ok("ranked"),
+        cfg    = CFG
     output:
-        csv  = f"results/{PREFIX}_final.csv",
-        xlsx = f"results/{PREFIX}_final.xlsx"
+        csv  = "results/{gene}_final.csv",
+        xlsx = "results/{gene}_final.xlsx"
     log:
-        "logs/09_export.log"
+        "logs/export_final/{gene}.log"
+    threads: 1
+    resources:
+        mem_mb  = 1000,
+        runtime = 5
+    conda: ENV
     shell:
-        """
-        python scripts/08_export_final.py \
-            --input  {input.ranked} \
-            --output results/{PREFIX}_final > {log} 2>&1
-        """
+        "{GUARD} {log} python scripts/export_final.py "
+        "--input {input.ranked} --config {input.cfg} "
+        "--output results/{wildcards.gene}_final"

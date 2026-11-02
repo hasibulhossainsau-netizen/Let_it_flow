@@ -5,8 +5,13 @@ Columns produced: grna_spacer, n_offtargets_0mm, n_offtargets_1mm,
                   n_offtargets_2mm, n_offtargets_3mm, total_offtargets
 """
 
-import pandas as pd
 import argparse
+
+import pandas as pd
+
+from utils.runtime import event, get_logger, init_script, run_main
+
+log = get_logger("04_parse_offtargets")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -14,6 +19,7 @@ def main():
     parser.add_argument("--grnas",   required=True, help="Filtered gRNA CSV")
     parser.add_argument("--output",  required=True, help="Output CSV with OT counts")
     args = parser.parse_args()
+    init_script(log, args, None, {"casoff": args.casoff, "grnas": args.grnas})
 
     # Load Cas-OFFinder results (tab-separated, no header)
     cols = ["spacer", "chromosome", "position", "direction",
@@ -21,12 +27,14 @@ def main():
     try:
         ot_df = pd.read_csv(args.casoff, sep="\t", header=None, names=cols)
     except Exception as e:
-        print(f"[WARN] Could not parse Cas-OFFinder output: {e}")
+        # An empty result file (zero hits) is legitimate; anything else is logged.
+        event(log, "WARNING", "no Cas-OFFinder hits parsed (empty or unreadable)",
+              error=str(e), path=args.casoff)
         ot_df = pd.DataFrame(columns=cols)
 
     # Pivot: count off-targets per spacer per mismatch level
     if not ot_df.empty:
-        # !!! এই লাইনটি যোগ করুন: ২৩ বেস থেকে কেটে শুধু প্রথম ২০ বেস রাখুন !!!
+        # Cas-OFFinder reports spacer+PAM (23 nt); keep only the 20-nt spacer.
         ot_df["spacer"] = ot_df["spacer"].str[:20] 
         
         summary = (
@@ -59,9 +67,11 @@ def main():
         merged[col] = merged[col].fillna(0).astype(int)
 
     merged.to_csv(args.output, index=False)
-    print(f"[OK] Off-target summary merged: {args.output}")
-    print(merged[["spacer","ot_0mm_adjusted","ot_1mm","ot_2mm","ot_3mm",
-                   "total_offtargets"]].head(10).to_string(index=False))
+    event(log, "INFO", "off-target summary merged", output=args.output,
+          rows=len(merged), cas_offinder_hits=len(ot_df))
+    log.info("first rows:\n%s",
+             merged[["spacer","ot_0mm_adjusted","ot_1mm","ot_2mm","ot_3mm",
+                     "total_offtargets"]].head(10).to_string(index=False))
 
 if __name__ == "__main__":
-    main()
+    run_main(main, "04_parse_offtargets")

@@ -1,0 +1,37 @@
+# envs/crispr_pipeline.yaml
+# -----------------------------------------------------------------------------
+# Single, fully pinned environment for the whole pipeline: used by
+#   * local installs        : conda/mamba env create -f envs/crispr_pipeline.yaml
+#   * Snakemake --use-conda : every rule's `conda:` points here
+#   * Docker / Singularity  : both images install exactly this file
+#
+# Exact-version pins (name=version) for every direct dependency. Channel order
+# matters: conda-forge first, then bioconda (the bioconda-recommended order);
+# `defaults` is deliberately NOT used, so builds are reproducible and free of
+# Anaconda ToS restrictions. For a bit-for-bit lock of transitive dependencies
+# see "Locking" in docs/ENVIRONMENT.md (`conda env export --no-builds`).
+# -----------------------------------------------------------------------------
+name: crispr_pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # ── Runtime ────────────────────────────────────────────────────────────────
+  - python=3.11.9
+  - pip=24.0
+  # ── Python libraries imported by scripts/ and interfaces/ ──────────────────
+  - pandas=2.2.1
+  - numpy=1.26.4
+  - openpyxl=3.1.2
+  - pyyaml=6.0.1
+  - jsonschema=4.21.1
+  - biopython=1.83            # not imported since Phase 3; kept as a pinned tool dep
+  # ── External bioinformatics tools ──────────────────────────────────────────
+  - blast=2.15.0              # blastn, makeblastdb
+  - viennarna=2.6.4           # RNAfold
+  - cas-offinder=2.4.1
+  - pocl=5.0                  # CPU OpenCL runtime (config: tools.cas_offinder_device "C")
+  # ── Testing (pytest tests/unit; integration test in tests/integration) ─────
+  - pytest=8.2.0
+  # ── Workflow engine ────────────────────────────────────────────────────────
+  - snakemake=8.5.3

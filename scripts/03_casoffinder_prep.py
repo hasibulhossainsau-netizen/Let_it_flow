@@ -8,22 +8,35 @@ Line 2: PAM pattern (e.g., NNNNNNNNNNNNNNNNNNNNNGG for 20bp + NGG)
 Line 3+: <SPACER_SEQUENCE> <MISMATCH_COUNT>
 """
 
-import pandas as pd
 import argparse
 import os
+
+import pandas as pd
+
+from utils.config import load_config
+from utils.runtime import event, get_logger, init_script, run_main
+
+log = get_logger("03_casoffinder_prep")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input",   required=True, help="Filtered gRNA CSV")
     parser.add_argument("--genome",  required=True, help="Path to genome FASTA")
     parser.add_argument("--output",  required=True, help="Cas-OFFinder input .txt")
-    parser.add_argument("--mm",      type=int, default=3, help="Max mismatches (default: 3)")
+    parser.add_argument("--mm",      type=int, default=None,
+                        help="Max mismatches (default: max_mismatches from config)")
+    parser.add_argument("--config",  default="config/config.yaml")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    init_script(log, args, cfg, {"input": args.input, "genome": args.genome})
+    mm = cfg["max_mismatches"] if args.mm is None else args.mm
+    guide = cfg["guide"]
 
     df = pd.read_csv(args.input)
     df = df[df["pre_filter_pass"] == True].copy()
 
-    pam_pattern = "N" * 20 + "NGG"   # 20bp spacer + NGG
+    pam_pattern = "N" * guide["spacer_length"] + guide["cas_offinder_pam"]
 
     with open(args.output, "w") as f:
         f.write(os.path.abspath(args.genome) + "\n")
@@ -33,10 +46,10 @@ def main():
             spacer = row["spacer"].upper().replace("U", "T")
             pam = row["pam"].upper().replace("U", "T")
             full_target = spacer + pam
-            f.write(f"{full_target}\t{args.mm}\n")
+            f.write(f"{full_target}\t{mm}\n")
 
-    print(f"[OK] Cas-OFFinder input written: {args.output}")
-    print(f"     {len(df)} gRNA queries | max mismatches: {args.mm}")
+    event(log, "INFO", "Cas-OFFinder input written", output=args.output,
+          n_queries=len(df), max_mismatches=mm, pam_pattern=pam_pattern)
 
 if __name__ == "__main__":
-    main()
+    run_main(main, "03_casoffinder_prep")

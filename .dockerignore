@@ -1,0 +1,7 @@
+.git
+.snakemake
+logs
+results
+data/processed
+**/__pycache__
+*.pyc

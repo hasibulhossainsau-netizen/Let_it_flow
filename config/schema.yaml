@@ -1,0 +1,198 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+description: Schema for config/config.yaml. Defaults reproduce the original pipeline behaviour.
+type: object
+additionalProperties: false
+required: [genome_fasta, target_gene_fasta]
+
+properties:
+  genome_fasta:      {type: string, minLength: 1}
+  target_gene_fasta: {type: string, minLength: 1}
+  max_mismatches:    {type: integer, minimum: 0, maximum: 6, default: 3}
+  threads:           {type: integer, minimum: 1, default: 4}
+  output_prefix:     {type: string, minLength: 1, default: "grna_results"}
+  seed:              {type: integer, minimum: 0, default: 42}   # Python + NumPy RNG seed
+
+  # Optional multi-gene mode: {gene_name: fasta_path}. Each key becomes a value
+  # of the {gene} wildcard in the Snakefile. When omitted, a single gene named
+  # after output_prefix is derived from target_gene_fasta (backward compatible).
+  genes:
+    type: object
+    minProperties: 1
+    propertyNames: {pattern: "^[A-Za-z0-9._-]+$"}
+    additionalProperties: {type: string, minLength: 1}
+
+  # MD5 manifest (md5sum format) covering the genome and every gene FASTA.
+  checksums_file: {type: string, minLength: 1, default: "data/raw/checksums.md5"}
+
+  tools:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      off_target_searchers:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items: {enum: [cas-offinder, blastn]}
+        default: [cas-offinder, blastn]
+      structure_predictor: {enum: [rnafold], default: rnafold}
+      cas_offinder_device: {enum: [C, G], default: C}
+      rnafold_timeout_s:   {type: integer, minimum: 1, default: 30}
+
+  validation:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      min_genome_length: {type: integer, minimum: 1, default: 1000000}
+      min_gene_length:   {type: integer, minimum: 1, default: 700}
+      max_genome_ambiguous_fraction: {type: number, minimum: 0, maximum: 1, default: 0.01}
+
+  guide:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      spacer_length:    {type: integer, minimum: 1, default: 20}
+      pam_regex:        {type: string, minLength: 1, default: '(?=(.{20}).GG)'}
+      pam_length:       {type: integer, minimum: 1, default: 3}
+      cas_offinder_pam: {type: string, pattern: "^[ACGTNRYSWKMBDHV]+$", default: "NGG"}
+      gc_min:           {type: number, minimum: 0, maximum: 1, default: 0.40}
+      gc_max:           {type: number, minimum: 0, maximum: 1, default: 0.75}
+      max_homopolymer:  {type: integer, minimum: 2, default: 5}
+      seed_length:      {type: integer, minimum: 1, default: 12}
+      seed_min_gc:      {type: number, minimum: 0, maximum: 1, default: 0.40}
+
+  blast:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      task:          {type: string, default: "blastn-short"}
+      word_size:     {type: integer, minimum: 4, default: 7}
+      perc_identity: {type: number, minimum: 0, maximum: 100, default: 80}
+      outfmt:
+        type: string
+        default: "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
+      min_pident:           {type: number, minimum: 0, maximum: 100, default: 85}
+      min_length:           {type: integer, minimum: 1, default: 15}
+      on_target_length:     {type: integer, minimum: 1, default: 20}
+      on_target_min_pident: {type: number, minimum: 0, maximum: 100, default: 95}
+
+  structure:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      scaffold:
+        type: string
+        pattern: "^[ACGTU]+$"
+        default: "GTTTTAGAGCTAGAAATAGCAAGTTAAAATAAGGCTAGTCCG"
+      mfe_floor:          {type: number, maximum: 0, default: -30.0}
+      mfe_score_decimals: {type: integer, minimum: 0, default: 3}
+
+  scoring:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      weights:
+        type: object
+        additionalProperties: false
+        default: {}
+        properties:
+          gc:         {type: number, minimum: 0, maximum: 1, default: 0.25}
+          seed_gc:    {type: number, minimum: 0, maximum: 1, default: 0.20}
+          mfe:        {type: number, minimum: 0, maximum: 1, default: 0.25}
+          off_target: {type: number, minimum: 0, maximum: 1, default: 0.30}
+      gc_curve:
+        type: object
+        additionalProperties: false
+        default: {}
+        properties:
+          optimal_min:  {type: number, minimum: 0, maximum: 1, default: 0.50}
+          optimal_max:  {type: number, minimum: 0, maximum: 1, default: 0.65}
+          lower_bound:  {type: number, minimum: 0, maximum: 1, default: 0.40}
+          upper_bound:  {type: number, minimum: 0, maximum: 1, default: 0.75}
+          lower_base:   {type: number, minimum: 0, maximum: 1, default: 0.70}
+          lower_slope:  {type: number, default: 3.0}
+          upper_slope:  {type: number, default: 5.0}
+          out_of_range: {type: number, minimum: 0, maximum: 1, default: 0.30}
+      seed_full_score_gc: {type: number, exclusiveMinimum: 0, maximum: 1, default: 0.5}
+      off_target_scores:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [max_hits, score]
+          properties:
+            max_hits: {type: integer, minimum: 0}
+            score:    {type: number, minimum: 0, maximum: 1}
+        default:
+          - {max_hits: 0,  score: 1.00}
+          - {max_hits: 1,  score: 0.85}
+          - {max_hits: 2,  score: 0.65}
+          - {max_hits: 5,  score: 0.45}
+          - {max_hits: 10, score: 0.25}
+      off_target_fallback_score: {type: number, minimum: 0, maximum: 1, default: 0.05}
+      verdict:
+        type: object
+        additionalProperties: false
+        default: {}
+        properties:
+          reject_total_offtargets_above: {type: integer, minimum: 0, default: 10}
+          top_candidate_min: {type: number, minimum: 0, maximum: 1, default: 0.75}
+          candidate_min:     {type: number, minimum: 0, maximum: 1, default: 0.55}
+          marginal_min:      {type: number, minimum: 0, maximum: 1, default: 0.35}
+      missing_column_defaults:
+        type: object
+        additionalProperties: {type: number}
+        default:
+          seed_gc: 0.5
+          mfe_score: 0.5
+          total_offtargets: 0
+          ot_0mm_adjusted: 0
+          blast_offtarget_hits: 0
+      score_decimals: {type: integer, minimum: 0, default: 4}
+
+  export:
+    type: object
+    additionalProperties: false
+    default: {}
+    properties:
+      sheet_name: {type: string, minLength: 1, maxLength: 31, default: "gRNA_Results"}
+      columns:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items: {type: string}
+        default:
+          - rank
+          - grna_id
+          - spacer
+          - pam
+          - strand
+          - position_nt
+          - gc_content
+          - seed_gc
+          - mfe_kcal
+          - mfe_score
+          - ot_0mm_adjusted
+          - ot_1mm
+          - ot_2mm
+          - ot_3mm
+          - total_offtargets
+          - blast_offtarget_hits
+          - efficiency_score
+          - verdict
+      colors:
+        type: object
+        additionalProperties: false
+        default: {}
+        properties:
+          header:        {type: string, pattern: "^[0-9A-Fa-f]{6}$", default: "4472C4"}
+          top_candidate: {type: string, pattern: "^[0-9A-Fa-f]{6}$", default: "C6EFCE"}
+          candidate:     {type: string, pattern: "^[0-9A-Fa-f]{6}$", default: "FFEB9C"}
+          marginal:      {type: string, pattern: "^[0-9A-Fa-f]{6}$", default: "FFCC99"}
+          reject:        {type: string, pattern: "^[0-9A-Fa-f]{6}$", default: "FFC7CE"}

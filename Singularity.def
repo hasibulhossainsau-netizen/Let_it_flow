@@ -1,0 +1,53 @@
+# Singularity.def — Apptainer/Singularity definition for HPC use
+#
+# Build (from the repository root, so %files can see envs/):
+#   apptainer build crispr-pipeline.sif Singularity.def
+#   # no root? add --fakeroot, or build with Docker and convert:
+#   #   apptainer build crispr-pipeline.sif docker-daemon://crispr-pipeline:latest
+#
+# Run (bind-mount the working directory; the image itself is read-only):
+#   apptainer exec --bind "$PWD":/pipeline --pwd /pipeline crispr-pipeline.sif \
+#       snakemake --cores 4
+#
+# Toolchain = envs/crispr_pipeline.yaml (exact version pins), same as the Docker image.
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.8
+
+%files
+    envs/crispr_pipeline.yaml /opt/crispr_pipeline.yaml
+
+%post
+    # Build runs as root; the micromamba root prefix in this base image is /opt/conda
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    micromamba install --yes --name base --file /opt/crispr_pipeline.yaml
+    micromamba clean --all --yes
+    rm /opt/crispr_pipeline.yaml
+
+%environment
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PATH=/opt/conda/bin:$PATH
+    export PYTHONHASHSEED=42
+    # Keep host Python settings from leaking into the container
+    unset PYTHONPATH PYTHONHOME
+
+%runscript
+    exec "$@"
+
+%test
+    export PATH=/opt/conda/bin:$PATH
+    python --version
+    python -c "import pandas, numpy, openpyxl, yaml, jsonschema, Bio"
+    snakemake --version
+    blastn -version
+    makeblastdb -version
+    RNAfold --version
+    cas-offinder 2>&1 | head -n 1
+
+%labels
+    Title crispr-pipeline
+    Description Cas9 gRNA design pipeline (Snakemake, BLAST+, Cas-OFFinder, ViennaRNA)
+
+%help
+    Cas9 gRNA design pipeline. Bind-mount the project directory and run snakemake:
+      apptainer exec --bind "$PWD":/pipeline --pwd /pipeline <image>.sif snakemake --cores 4

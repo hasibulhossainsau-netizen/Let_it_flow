@@ -1,0 +1,16 @@
+# Config for the toy integration test (tests/integration/test_toy_pipeline.py).
+# Same schema as config/config.yaml; only inputs and size thresholds differ so
+# that the 1 kb genome / 100 bp gene pass input validation.
+genome_fasta:      "data/raw/toy_genome.fasta"
+target_gene_fasta: "data/raw/toy_gene.fasta"
+checksums_file:    "data/raw/checksums.md5"
+genes:
+  toy_gene: "data/raw/toy_gene.fasta"
+output_prefix: "toy"
+max_mismatches: 3
+threads: 1
+seed: 42
+
+validation:
+  min_genome_length: 1000
+  min_gene_length:   100
