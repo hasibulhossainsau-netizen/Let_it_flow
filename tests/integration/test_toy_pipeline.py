@@ -71,9 +71,11 @@ def workdir(tmp_path_factory):
 def run_snakemake(work, *extra):
     cmd = ["snakemake", "--cores", "1", *extra]
     if USE_CONDA:
-        cmd += ["--use-conda", "--conda-prefix", CONDA_PREFIX]
-        if shutil.which("mamba") is None:   # Snakemake 8 defaults to the mamba frontend
-            cmd += ["--conda-frontend", "conda"]
+        # Always use the conda frontend: Snakemake 8.5 defaults to `mamba env create
+        # --quiet ...`, which fails against the mamba 2.x shipped by recent
+        # Miniforge/setup-miniconda. conda (libmamba solver) is just as fast.
+        cmd += ["--use-conda", "--conda-prefix", CONDA_PREFIX,
+                "--conda-frontend", "conda"]
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True,
                           timeout=3000)
