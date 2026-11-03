@@ -11,6 +11,7 @@ Environment knobs:
                            (default ~/.cache/crispr_pipeline_tests/conda), so
                            the ~450 MB env is built once, not per test run.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -45,12 +46,26 @@ def _skip_reason():
     return None
 
 
+def write_checksums(work):
+    """Write the MD5s of the synthetic inputs into the workdir's checksums.md5.
+
+    Computed from the files actually present, so the closed checksum_verify
+    rule can never fail on a stale or line-ending-altered fixture checksum.
+    """
+    raw = work / "data" / "raw"
+    lines = [f"{hashlib.md5((raw / name).read_bytes()).hexdigest()}  data/raw/{name}"
+             for name in ("toy_genome.fasta", "toy_gene.fasta")]
+    (raw / "checksums.md5").write_text("\n".join(lines) + "\n")
+
+
 @pytest.fixture(scope="module")
 def workdir(tmp_path_factory):
     reason = _skip_reason()
     if reason:
         pytest.skip(reason)
-    return build_workdir(tmp_path_factory.mktemp("toy_run"))
+    work = build_workdir(tmp_path_factory.mktemp("toy_run"))
+    write_checksums(work)
+    return work
 
 
 def run_snakemake(work, *extra):
