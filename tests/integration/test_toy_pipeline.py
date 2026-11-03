@@ -82,9 +82,13 @@ def run_snakemake(work, *extra):
 @pytest.fixture(scope="module")
 def first_run(workdir):
     proc = run_snakemake(workdir)
-    assert proc.returncode == 0, (
-        f"snakemake failed ({proc.returncode})\n--- stdout ---\n{proc.stdout[-4000:]}"
-        f"\n--- stderr ---\n{proc.stderr[-4000:]}")
+    if proc.returncode != 0:
+        # Full, untruncated output (run_snakemake uses text=True, so these are str).
+        pytest.fail(
+            f"snakemake failed (exit {proc.returncode})\n"
+            f"command: {' '.join(proc.args)}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
+            pytrace=False)
     return proc
 
 
